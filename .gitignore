@@ -1,0 +1,27 @@
+# STM32 build folders
+/Debug/
+/Release/
+
+# CubeMX metadata
+*.ioc
+
+# IDE-specific files
+/.settings/
+/.vscode/
+/*.launch
+
+# Object files, binaries
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+
+# Auto-generated logs or temp files
+*.log
+*.d
+*.dep
+
+# Mac or Windows junk
+.DS_Store
+Thumbs.db
