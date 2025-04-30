@@ -40,6 +40,11 @@
 #define TS_RIGHT 320
 #define TS_TOP 0
 #define TS_BOT 240
+#define BACK_BUTTON_OFFSET 60 //experimentally determined for UI smoothness
+#define NEXT_BUTTON_OFFSET 60 //experimentally determined for UI smoothness
+#define QUEUE_BUTTON_OFFSET 40 //experimentally determined for UI smoothness
+#define PROTOCOL_BUTTON_OFFSET 20
+#define DEBOUNCE_DELAY_MS 20
 
 /***** USB DEFINITIONS *****/
 #define NULL_CHAR 0
@@ -175,6 +180,8 @@ int _write(int file, char *ptr, int len) {
 	return len;
 }
 
+volatile uint32_t last_interrupt_time = 0;
+static bool prevTouchedState = 1; //pretty sure it starts high
 uint8_t count = 0;
 static uint8_t touchFlag = 0;
 static uint8_t page_num = 1;
@@ -291,7 +298,6 @@ int main(void)
 //  	erase_sector(8);
 //  	erase_sector(9);
 //  	erase_sector(10);
-
 	HAL_GPIO_WritePin(LCD_NRST_GPIO_Port, LCD_NRST_Pin, GPIO_PIN_SET);
 	HAL_Delay(50);
 	HAL_GPIO_WritePin(LCD_NRST_GPIO_Port, LCD_NRST_Pin, GPIO_PIN_SET);
@@ -318,7 +324,7 @@ int main(void)
 			handleTouch();
 			touchFlag = 0;
 		}
-		//HAL_Delay(100);
+		HAL_Delay(100);
 	}
   /* USER CODE END 3 */
 }
@@ -601,7 +607,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : T_IRQ_Pin */
   GPIO_InitStruct.Pin = T_IRQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(T_IRQ_GPIO_Port, &GPIO_InitStruct);
 
@@ -695,8 +701,7 @@ void DrawMainPage(uint8_t page_num) {
 	//draw "Queue" button on page 1
 
 	if (page_num == 1) {
-		lcdDrawRect(queueButton.x, queueButton.y, queueButton.w,
-				queueButton.h,
+		lcdDrawRect(queueButton.x, queueButton.y, queueButton.w, queueButton.h,
 		COLOR_BLACK);
 		lcdSetCursor(queueButton.x + 5, queueButton.y + 5);
 		lcdPrintf(queueButton.label);
@@ -779,7 +784,7 @@ void DrawQueuePage(uint8_t queueSize) {
 			startSpotY = 50;
 		} else {
 			startSpotX = 160;
-			startSpotY = 50 - 100;//convoluted ik
+			startSpotY = 50 - 100;	//convoluted ik
 		}
 		sprintf(format, "%d.) ", i + 1);
 		lcdSetCursor(startSpotX, startSpotY + i * 20);
@@ -823,44 +828,47 @@ uint8_t handleTouch() {
 	static uint8_t protocol_offset = 0;
 	uint16_t x = 0, y = 0;
 	if (!XPT2046_TouchGetCoordinates(&x, &y)) {
+		printf("failed\n");
 		return 0;
 	}
 	//map the x coordinate to be left is 0. also slight offset
 	x = (TS_RIGHT - x) - 0;
+	printf("touched\n");
 	printf("%d, %d\n", x, y);
 
 	switch (currentPage) {
 	case PAGE_MAIN:
 		//next button
-		if ((x > nextButton.x) && (x < nextButton.x + nextButton.w)
-				&& (y > nextButton.y) && (y < nextButton.y + nextButton.h)
+		if ((x >= nextButton.x) && (x <= nextButton.x + nextButton.w)
+				&& (y >= nextButton.y)
+				&& (y <= nextButton.y + nextButton.h + NEXT_BUTTON_OFFSET)
 				&& (page_num != 10)) {
 			//printf("touched\n");
 			page_num++;
 			DrawMainPage(page_num);
 		}
 		//back button
-		if ((x > backButton.x) && (x < backButton.x + backButton.w)
-				&& (y > backButton.y) && (y < backButton.y + backButton.h)
+		if ((x >= backButton.x) && (x <= backButton.x + backButton.w)
+				&& (y >= backButton.y)
+				&& (y <= backButton.y + backButton.h + BACK_BUTTON_OFFSET)
 				&& (page_num != 1)) {
 			//printf("touched\n");
 			page_num--;
 			DrawMainPage(page_num);
 		}
 		//queue button
-		if (x >= queueButton.x
-				&& x <= (queueButton.x + queueButton.w)
+		if (x >= queueButton.x && x <= (queueButton.x + queueButton.w)
 				&& y >= queueButton.y
-				&& y <= (queueButton.y + queueButton.h)
+				&& y <= (queueButton.y + queueButton.h + QUEUE_BUTTON_OFFSET)
 				&& (page_num == 1)) {
 			DrawQueuePage(queueSize);
 			currentPage = PAGE_QUEUE;
 		}
 		//three protocol buttons
 		for (int i = 0; i < NUM_BUTTONS; i++) {
-			if (x >= buttons[i].x && x <= (buttons[i].x + buttons[i].w)
-					&& y >= buttons[i].y
-					&& y <= (buttons[i].y + buttons[i].h)) {
+			if ((x >= buttons[i].x) && (x <= buttons[i].x + buttons[i].w)
+					&& (y >= buttons[i].y - PROTOCOL_BUTTON_OFFSET)
+					&& (y <= buttons[i].y + buttons[i].h + PROTOCOL_BUTTON_OFFSET)) {
 				//check which button has been pressed
 				if (i == 0) {
 					protocol_num = 1;
@@ -1316,10 +1324,30 @@ uint32_t sector_mapping(uint32_t sector) {
 }
 
 /*** Touchscreen Interrupt Handler ****/
+//t_irq_pin is default high. it gets driven low while the screen is touched.
+//the interrupt is triggered on falling edge.
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	if (GPIO_Pin == T_IRQ_Pin) {
-		if (XPT2046_TouchPressed()) {
-			touchFlag = 1;
+
+		uint32_t current_time = HAL_GetTick(); // ms since startup
+
+		//perform some debouncing for interrupt pin
+		if ((current_time - last_interrupt_time) > 30) {
+			last_interrupt_time = current_time;
+
+			//handle the actual interrupt below
+			uint8_t currentTouchedState = HAL_GPIO_ReadPin(T_IRQ_GPIO_Port,
+			T_IRQ_Pin);
+			if (currentTouchedState == 1) {
+				printf("high");
+			}
+			if (currentTouchedState == 0) {
+				printf("low");
+			}
+			//printf("%d\n", currentTouchedState)
+			if (XPT2046_TouchPressed() && !touchFlag) {
+				touchFlag = 1;
+			}
 		}
 	}
 }
